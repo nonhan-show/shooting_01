@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Survival Bullet Hell Mobile - Boss Edition</title>
+<style>
+  body, html {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden; font-family: sans-serif;
+    touch-action: none;
+  }
+  #gameContainer {
+    position: relative; width: 100vw; height: 100vh;
+    display: flex; justify-content: center; align-items: center;
+    background: #111;
+  }
+  canvas {
+    width: 100%; height: 100%; object-fit: contain;
+    background: #000; box-shadow: 0 0 20px rgba(255,0,0,0.15);
+  }
+  #btn-x {
+    position: absolute; bottom: 80px; right: 20px; z-index: 100;
+    width: 70px; height: 70px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.15); border: 2px solid rgba(255, 255, 255, 0.5);
+    color: white; font-weight: bold; font-size: 13px;
+    display: flex; justify-content: center; align-items: center; text-align: center;
+    user-select: none; pointer-events: auto; line-height: 1.2;
+  }
+  #btn-x.active { background: rgba(255, 255, 0, 0.5); border-color: yellow; }
+  
+  /* シェアボタンのスタイル */
+  #share-btn {
+    position: absolute; bottom: 22%; z-index: 150;
+    padding: 12px 28px; background: #000; color: #fff;
+    border: 2px solid #fff; border-radius: 30px;
+    font-size: 16px; font-weight: bold; cursor: pointer;
+    display: none; /* ゲーム中は非表示 */
+    pointer-events: auto; box-shadow: 0 0 10px rgba(255,255,255,0.5);
+  }
+  #share-btn:active { background: #333; }
+
+  #ui-layer {
+    position: absolute; top: 10px; width: 100%; text-align: center;
+    pointer-events: none;
+  }
+  #timer-display {
+    color: white; font-size: 32px; font-weight: bold; text-shadow: 0 0 5px red;
+  }
+  #instructions {
+    color: rgba(255,255,255,0.7); font-size: 12px; margin-top: 5px;
+  }
+</style>
+</head>
+<body>
+
+<div id="gameContainer">
+  <div id="ui-layer">
+    <div id="timer-display">00:00.0</div>
+    <div id="instructions">40秒ごとにボス出現！オプションはザコを自動迎撃！<br>カプセルを集めて右下ボタンで強化！</div>
+  </div>
+  <canvas id="gameCanvas" width="450" height="800"></canvas>
+  <div id="btn-x">POWER<br>UP</div>
+  
+  <button id="share-btn">結果をシェアする</button>
+</div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+const timerEl = document.getElementById("timer-display");
+const shareBtn = document.getElementById("share-btn");
+
+let frameCount = 0;
+let gameOver = false;
+let survivalTime = 0;
+let lastTime = null;
+
+const POWERUPS = ["SPREAD", "HOMING", "LASER", "OPTION", "SHIELD"];
+let gaugeIndex = -1;
+
+let bullets = []; 
+let enemyBullets = [];
+let enemies = []; 
+let activeBosses = []; 
+let items = []; 
+let particles = [];
+let player = {};
+
+let gridOffset = 0; 
+const GRID_SIZE = 50;
+let bossIndex = 0;
+
+// --- スワイプ操作 ---
+let isDragging = false;
+let lastTouchX = 0; let lastTouchY = 0;
+
+window.addEventListener("pointerdown", e => {
+  if (e.target.id === "btn-x" || e.target.id === "share-btn") return;
+  if (gameOver) { initGame(); return; }
+  isDragging = true; lastTouchX = e.clientX; lastTouchY = e.clientY;
+});
+window.addEventListener("pointermove", e => {
+  if (!isDragging || gameOver) return;
+  e.preventDefault();
+  const scaleX = 450 / window.innerWidth;
+  const scaleY = 800 / window.innerHeight;
+  const sensitivity = 1.3;
+  
+  player.x += (e.clientX - lastTouchX) * scaleX * sensitivity;
+  player.y += (e.clientY - lastTouchY) * scaleY * sensitivity;
+  player.x = Math.max(15, Math.min(435, player.x));
+  player.y = Math.max(15, Math.min(785, player.y));
+  lastTouchX = e.clientX; lastTouchY = e.clientY;
+});
+window.addEventListener("pointerup", () => isDragging = false);
+window.addEventListener("pointercancel", () => isDragging = false);
+
+// --- パワーアップボタン ---
+const btnX = document.getElementById("btn-x");
+btnX.addEventListener("pointerdown", e => {
+  e.preventDefault(); btnX.classList.add("active");
+  if (gaugeIndex >= 0 && !gameOver) { applyPowerup(gaugeIndex); gaugeIndex = -1; }
+});
+btnX.addEventListener("pointerup", () => btnX.classList.remove("active"));
+btnX.addEventListener("pointerleave", () => btnX.classList.remove("active"));
+
+// --- 画像付き 汎用シェア処理 ---
+shareBtn.addEventListener("click", async (e) => {
+  e.preventDefault();
+  const timeText = timerEl.innerText;
+  const text = `サイバーサバイバルシューティングで【${timeText}】生き残った！\nボスを倒して限界に挑戦！\n#SurvivalShooter\n`;
+  const url = window.location.href; 
+
+  canvas.toBlob(async (blob) => {
+    if (!blob) return;
+    const file = new File([blob], "score.png", { type: "image/png" });
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          text: text + url,
+          files: [file]
+        });
+        return; 
+      } catch (err) {
+        console.log("Share failed or cancelled:", err);
+      }
+    }
+
+    // Web Share API 非対応環境（PCなど）の代替処理
+    alert("お使いのブラウザでは直接シェア画面を開けないため、スクリーンショットを保存しました！\nLINEやSNSなどに画像を添付してシェアしてください。（※自動で𝕏の投稿画面も開きます）");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `score_${timeText.replace(":", "_")}.png`;
+    a.click(); 
+    
+    const encodedText = encodeURIComponent(text);
+    const encodedUrl = encodeURIComponent(url);
+    window.open(`https://twitter.com/intent/tweet?text=${encodedText}&url=${encodedUrl}`, '_blank');
+  }, "image/png");
+});
+
+function applyPowerup(index) {
+  const type = POWERUPS[index];
+  if (type === "SPREAD") { player.weapons.spread = true; player.weapons.laser = false; }
+  if (type === "HOMING") player.weapons.homing = true;
+  if (type === "LASER") { player.weapons.laser = true; player.weapons.spread = false; }
+  if (type === "OPTION") player.options = Math.min(player.options + 1, 4);
+  if (type === "SHIELD") player.hp = 4;
+}
+
+// --- 初期化 ---
+function initGame() {
+  player = { x: 225, y: 600, drawRadius: 12, hitRadius: 3, hp: 1, weapons: { spread: false, homing: false, laser: false }, options: 0, shotTimer: 0, angle: -Math.PI/2 };
+  bullets = []; enemyBullets = []; enemies = []; activeBosses = []; items = []; particles = []; 
+  gaugeIndex = -1; frameCount = 0; gameOver = false; survivalTime = 0; lastTime = null; gridOffset = 0; bossIndex = 0;
+  document.getElementById("instructions").style.display = "none";
+  shareBtn.style.display = "none"; 
+}
+
+function getNearestEnemy(sx, sy, focusBoss = true) {
+  let nearest = null; let minDist = Infinity;
+  if (focusBoss && activeBosses.length > 0) {
+    activeBosses.forEach(b => {
+      let d = Math.hypot(b.x - sx, b.y - sy);
+      if (d < minDist) { minDist = d; nearest = b; }
+    });
+    if (nearest) return nearest; 
+  }
+  let allTargets = enemies.concat(activeBosses);
+  allTargets.forEach(e => {
+    let d = Math.hypot(e.x - sx, e.y - sy);
+    if (d < minDist) { minDist = d; nearest = e; }
+  });
+  return nearest;
+}
+
+function shoot(sx, sy, isOption = false) {
+  let target = getNearestEnemy(sx, sy, !isOption); 
+  let baseAngle = -Math.PI / 2;
+  if (target) baseAngle = Math.atan2(target.y - sy, target.x - sx);
+  
+  if (!isOption) player.angle = baseAngle;
+
+  if (player.weapons.laser) {
+    bullets.push({ x: sx, y: sy, vx: Math.cos(baseAngle)*18, vy: Math.sin(baseAngle)*18, w: 8, h: 8, color: "cyan", type: "laser", piercing: true });
+  } else {
+    bullets.push({ x: sx, y: sy, vx: Math.cos(baseAngle)*14, vy: Math.sin(baseAngle)*14, w: 6, h: 6, color: "yellow", type: "normal", piercing: false });
+    if (player.weapons.spread) {
+      bullets.push({ x: sx, y: sy, vx: Math.cos(baseAngle - 0.35)*14, vy: Math.sin(baseAngle - 0.35)*14, w: 6, h: 6, color: "yellow", type: "normal", piercing: false });
+      bullets.push({ x: sx, y: sy, vx: Math.cos(baseAngle + 0.35)*14, vy: Math.sin(baseAngle + 0.35)*14, w: 6, h: 6, color: "yellow", type: "normal", piercing: false });
+      bullets.push({ x: sx, y: sy, vx: Math.cos(baseAngle + Math.PI)*14, vy: Math.sin(baseAngle + Math.PI)*14, w: 6, h: 6, color: "yellow", type: "normal", piercing: false });
+    }
+  }
+  if (player.weapons.homing) {
+    bullets.push({ x: sx, y: sy, vx: Math.cos(baseAngle)*6, vy: Math.sin(baseAngle)*6, w: 6, h: 6, color: "orange", type: "homing", piercing: false });
+  }
+}
+
+function spawnBoss(index) {
+  let type = index % 5;
+  let hpScale = 1 + (Math.floor(index / 5) * 0.5); 
+  let b = { x: 225, y: -50, type: type, age: 0 };
+  
+  if (type === 0) { b.hp = 1200 * hpScale; b.radius = 28; b.color = "#ff8800"; b.name = "Type-α JUGGERNAUT"; }
+  else if (type === 1) { b.hp = 800 * hpScale; b.radius = 22; b.color = "#00ffcc"; b.name = "Type-β STRIKER"; }
+  else if (type === 2) { b.hp = 1000 * hpScale; b.radius = 25; b.color = "#ff00ff"; b.name = "Type-γ WOBBLER"; }
+  else if (type === 3) { b.hp = 1500 * hpScale; b.radius = 35; b.color = "#88ff00"; b.name = "Type-δ CARRIER"; }
+  else if (type === 4) { b.hp = 2500 * hpScale; b.radius = 45; b.color = "#ff0000"; b.name = "Type-ε FORTRESS"; }
+  
+  b.maxHp = b.hp;
+  activeBosses.push(b);
+}
+
+function update(currentTime) {
+  if (gameOver) return;
+  if (lastTime === null) lastTime = currentTime;
+  let dt = currentTime - lastTime;
+  lastTime = currentTime;
+  survivalTime += dt;
+  frameCount++;
+
+  let ms = Math.floor((survivalTime % 1000) / 100);
+  let sec = Math.floor((survivalTime / 1000) % 60);
+  let min = Math.floor(survivalTime / 60000);
+  timerEl.innerText = `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${ms}`;
+
+  gridOffset = (gridOffset + 1.5 + (survivalTime / 60000)) % GRID_SIZE;
+
+  if (survivalTime > (bossIndex + 1) * 40000) { spawnBoss(bossIndex); bossIndex++; }
+
+  if (player.shotTimer <= 0) {
+    shoot(player.x, player.y, false);
+    for (let i = 1; i <= player.options; i++) {
+      let optAngle = (frameCount * 0.07) + (i * Math.PI / 2);
+      shoot(player.x + Math.cos(optAngle)*35, player.y + Math.sin(optAngle)*35, true);
+    }
+    player.shotTimer = player.weapons.laser ? 12 : 6;
+  }
+  if (player.shotTimer > 0) player.shotTimer--;
+
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    let b = bullets[i];
+    if (b.type === "homing") {
+      let target = getNearestEnemy(b.x, b.y, false);
+      if (target) {
+        let angle = Math.atan2(target.y - b.y, target.x - b.x);
+        b.vx += Math.cos(angle) * 1.0; b.vy += Math.sin(angle) * 1.0;
+        let speed = Math.hypot(b.vx, b.vy);
+        if (speed > 10) { b.vx = (b.vx/speed)*10; b.vy = (b.vy/speed)*10; }
+      }
+    }
+    b.x += b.vx; b.y += b.vy;
+    if (b.x < -20 || b.x > 470 || b.y < -20 || b.y > 820) bullets.splice(i, 1);
+  }
+
+  for (let i = activeBosses.length - 1; i >= 0; i--) {
+    let b = activeBosses[i]; b.age++;
+    let angleToPlayer = Math.atan2(player.y - b.y, player.x - b.x);
+    
+    if (b.type === 0) {
+      b.x += Math.cos(angleToPlayer) * 0.4; b.y += Math.sin(angleToPlayer) * 0.4;
+      if (b.age % 90 === 0) { for(let j=0; j<8; j++) enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(j*Math.PI/4)*3, vy: Math.sin(j*Math.PI/4)*3, radius: 5}); }
+    } else if (b.type === 1) {
+      if (b.age % 120 < 60) { b.x += Math.cos(angleToPlayer) * 2.5; b.y += Math.sin(angleToPlayer) * 2.5; }
+      else if (b.age % 120 === 60) {
+        for(let j=-2; j<=2; j++) {
+          let a = angleToPlayer + j*0.2;
+          enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(a)*4, vy: Math.sin(a)*4, radius: 4});
+        }
+      }
+    } else if (b.type === 2) {
+      b.x = 225 + Math.sin(b.age * 0.02) * 150; b.y = 150 + Math.cos(b.age * 0.03) * 50;
+      if (b.age % 8 === 0) { let a = b.age * 0.15; enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(a)*3.5, vy: Math.sin(a)*3.5, radius: 5}); }
+    } else if (b.type === 3) {
+      b.x += (225 + Math.sin(b.age * 0.01) * 150 - b.x) * 0.05; b.y += (120 - b.y) * 0.05;
+      if (b.age % 120 === 0) {
+        enemies.push({ x: b.x - 20, y: b.y, radius: 10, hp: 3, isRed: true, isShooter: false, shootTimer: 0 });
+        enemies.push({ x: b.x + 20, y: b.y, radius: 10, hp: 3, isRed: true, isShooter: false, shootTimer: 0 });
+      }
+      if (b.age % 60 === 0) {
+        enemyBullets.push({x: b.x, y: b.y, vx: 0, vy: 5, radius: 6});
+        enemyBullets.push({x: b.x-40, y: b.y, vx: 0, vy: 5, radius: 6});
+        enemyBullets.push({x: b.x+40, y: b.y, vx: 0, vy: 5, radius: 6});
+      }
+    } else if (b.type === 4) {
+      b.x += (225 - b.x) * 0.02; b.y += (200 - b.y) * 0.02;
+      if (b.age % 12 === 0) {
+        for(let j=0; j<4; j++) { let a = b.age * 0.05 + j * Math.PI/2; enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(a)*3, vy: Math.sin(a)*3, radius: 6}); }
+      }
+      if (b.age % 100 === 0) enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(angleToPlayer)*7, vy: Math.sin(angleToPlayer)*7, radius: 8});
+    }
+    
+    b.x = Math.max(b.radius, Math.min(450-b.radius, b.x)); b.y = Math.max(b.radius, Math.min(800-b.radius, b.y));
+
+    let hit = false;
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      let bl = bullets[j];
+      if (Math.hypot(b.x - bl.x, b.y - bl.y) < b.radius + 6) {
+        b.hp -= (bl.type === "laser") ? 4 : 1; 
+        if (!bl.piercing) bullets.splice(j, 1);
+        if (Math.random() < 0.2) particles.push({x: bl.x, y: bl.y, vx: Math.random()*4-2, vy: Math.random()*4-2, life: 10});
+
+        if (b.hp <= 0) {
+          hit = true;
+          for(let p=0; p<50; p++) particles.push({x: b.x, y: b.y, vx: Math.random()*12-6, vy: Math.random()*12-6, life: 40});
+          for(let c=0; c<8; c++) items.push({ x: b.x + (Math.random()*60-30), y: b.y + (Math.random()*60-30), radius: 8 });
+          activeBosses.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    if (!hit && !gameOver && Math.hypot(b.x - player.x, b.y - player.y) < b.radius + player.hitRadius) {
+      player.hp--;
+      if (player.hp <= 0) gameOver = true;
+    }
+  }
+
+  let spawnRate = Math.max(5, 60 - Math.floor(survivalTime / 1000)); 
+  if (activeBosses.length > 0) spawnRate *= 2; 
+  let baseHp = 1 + Math.floor(survivalTime / 20000);
+
+  if (frameCount % spawnRate === 0) {
+    let isRed = Math.random() < 0.2;
+    let isShooter = !isRed && (survivalTime > 10000) && (Math.random() < Math.min(0.35, survivalTime / 80000));
+    let side = Math.floor(Math.random() * 4);
+    let ex, ey;
+    if (side === 0) { ex = Math.random()*450; ey = -30; } else if (side === 1) { ex = Math.random()*450; ey = 830; } 
+    else if (side === 2) { ex = -30; ey = Math.random()*800; } else { ex = 480; ey = Math.random()*800; } 
+    enemies.push({ x: ex, y: ey, radius: 11, hp: (isRed ? baseHp * 2 : baseHp) + (isShooter ? 1 : 0), isRed: isRed, isShooter: isShooter, shootTimer: Math.random() * 60 + 30 });
+  }
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    let e = enemies[i];
+    let distToPlayer = Math.hypot(player.x - e.x, player.y - e.y);
+    let angleToPlayer = Math.atan2(player.y - e.y, player.x - e.x);
+    let speed = 1.2 + (survivalTime / 40000); 
+
+    if (e.isShooter && distToPlayer < 220) speed = distToPlayer < 180 ? -0.8 : 0.2; 
+    e.x += Math.cos(angleToPlayer) * speed; e.y += Math.sin(angleToPlayer) * speed;
+
+    if (e.isShooter) {
+      e.shootTimer--;
+      if (e.shootTimer <= 0) {
+        let bSpeed = 2.5 + (survivalTime / 50000); 
+        enemyBullets.push({ x: e.x, y: e.y, vx: Math.cos(angleToPlayer) * bSpeed, vy: Math.sin(angleToPlayer) * bSpeed, radius: 4 });
+        e.shootTimer = Math.max(40, 100 - Math.floor(survivalTime / 1000)); 
+      }
+    }
+
+    let hit = false;
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      let b = bullets[j];
+      if (Math.hypot(e.x - b.x, e.y - b.y) < e.radius + 6) {
+        e.hp -= (b.type === "laser") ? 4 : 1;
+        if (!b.piercing) bullets.splice(j, 1);
+        if (e.hp <= 0) {
+          hit = true;
+          for(let p=0; p<6; p++) particles.push({x: e.x, y: e.y, vx: Math.random()*5-2.5, vy: Math.random()*5-2.5, life: 25});
+          if (e.isRed) items.push({ x: e.x, y: e.y, radius: 8 });
+          enemies.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    if (!hit && !gameOver && distToPlayer < e.radius + player.hitRadius) {
+      player.hp--; enemies.splice(i, 1);
+      if (player.hp <= 0) gameOver = true;
+    }
+  }
+
+  for (let i = enemyBullets.length - 1; i >= 0; i--) {
+    let eb = enemyBullets[i];
+    eb.x += eb.vx; eb.y += eb.vy;
+    if (eb.x < -20 || eb.x > 470 || eb.y < -20 || eb.y > 820) { enemyBullets.splice(i, 1); continue; }
+    if (!gameOver && Math.hypot(eb.x - player.x, eb.y - player.y) < eb.radius + player.hitRadius) {
+      player.hp--; enemyBullets.splice(i, 1);
+      for(let p=0; p<10; p++) particles.push({x: player.x, y: player.y, vx: Math.random()*6-3, vy: Math.random()*6-3, life: 30});
+      if (player.hp <= 0) gameOver = true;
+    }
+  }
+
+  for (let i = items.length - 1; i >= 0; i--) {
+    let item = items[i];
+    item.y += 0.8;
+    let dist = Math.hypot(item.x - player.x, item.y - player.y);
+    if (dist < 80) { item.x += (player.x - item.x) * 0.15; item.y += (player.y - item.y) * 0.15; }
+    if (dist < item.radius + player.drawRadius) {
+      gaugeIndex = (gaugeIndex + 1) % POWERUPS.length; items.splice(i, 1);
+    } else if (item.y > 820) items.splice(i, 1);
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].x += particles[i].vx; particles[i].y += particles[i].vy; particles[i].life--;
+    if (particles[i].life <= 0) particles.splice(i, 1);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = "#000510"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.strokeStyle = "#1a2a40"; ctx.lineWidth = 1.5; ctx.beginPath();
+  for (let x = 0; x <= 450; x += GRID_SIZE) { ctx.moveTo(x, 0); ctx.lineTo(x, 800); }
+  for (let y = gridOffset - GRID_SIZE; y <= 800; y += GRID_SIZE) { ctx.moveTo(0, y); ctx.lineTo(450, y); }
+  ctx.stroke();
+
+  ctx.fillStyle = "red";
+  items.forEach(item => {
+    ctx.beginPath(); ctx.ellipse(item.x, item.y, 8, 4, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "white"; ctx.fillRect(item.x-4, item.y-2, 8, 4); ctx.fillStyle = "red";
+  });
+
+  activeBosses.forEach(b => {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.fillStyle = b.color;
+    if (b.type === 0) {
+      ctx.rotate(b.age * 0.02); ctx.beginPath();
+      for(let i=0; i<8; i++) ctx.lineTo(Math.cos(i*Math.PI/4)*b.radius, Math.sin(i*Math.PI/4)*b.radius);
+      ctx.fill();
+    } else if (b.type === 1) {
+      ctx.rotate(Math.atan2(player.y - b.y, player.x - b.x) - Math.PI/2);
+      ctx.beginPath(); ctx.moveTo(0, b.radius); ctx.lineTo(-b.radius, -b.radius); ctx.lineTo(b.radius, -b.radius); ctx.fill();
+    } else if (b.type === 2) {
+      ctx.beginPath(); ctx.arc(0, 0, b.radius, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.fillRect(-5, -b.radius, 10, b.radius*2); ctx.fillRect(-b.radius, -5, b.radius*2, 10);
+    } else if (b.type === 3) {
+      ctx.beginPath(); ctx.ellipse(0, 0, b.radius, b.radius*0.6, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(0, -b.radius*0.3, b.radius*0.4, 0, Math.PI*2); ctx.fill();
+    } else if (b.type === 4) {
+      ctx.rotate(b.age * -0.01);
+      ctx.beginPath(); ctx.moveTo(0, b.radius); ctx.lineTo(-b.radius, 0); ctx.lineTo(0, -b.radius); ctx.lineTo(b.radius, 0); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(0, b.radius/2); ctx.lineTo(-b.radius/2, 0); ctx.lineTo(0, -b.radius/2); ctx.lineTo(b.radius/2, 0); ctx.fill();
+    }
+    ctx.restore();
+  });
+
+  enemies.forEach(e => {
+    ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(frameCount * 0.1);
+    ctx.fillStyle = e.isShooter ? "#aa44ff" : (e.isRed ? "#ff4444" : "#44ff44");
+    ctx.fillRect(-e.radius, -e.radius, e.radius*2, e.radius*2);
+    ctx.fillStyle = "white"; ctx.fillRect(-3, -3, 6, 6); ctx.restore();
+  });
+
+  enemyBullets.forEach(eb => {
+    ctx.beginPath(); ctx.arc(eb.x, eb.y, eb.radius, 0, Math.PI*2); ctx.fillStyle = "#ff66aa"; ctx.fill();
+    ctx.beginPath(); ctx.arc(eb.x, eb.y, eb.radius * 0.5, 0, Math.PI*2); ctx.fillStyle = "white"; ctx.fill();
+  });
+
+  bullets.forEach(b => {
+    ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(Math.atan2(b.vy, b.vx)); ctx.fillStyle = b.color;
+    if(b.type === "laser") ctx.fillRect(-15, -4, 30, 8); else ctx.fillRect(-4, -4, 8, 8);
+    ctx.restore();
+  });
+
+  ctx.fillStyle = "orange"; particles.forEach(p => ctx.fillRect(p.x, p.y, 4, 4));
+
+  if (!gameOver) {
+    ctx.fillStyle = "#ffaa00";
+    for (let i = 1; i <= player.options; i++) {
+      let optAngle = (frameCount * 0.07) + (i * Math.PI / 2);
+      ctx.beginPath(); ctx.arc(player.x + Math.cos(optAngle)*35, player.y + Math.sin(optAngle)*35, 6, 0, Math.PI*2); ctx.fill();
+    }
+    
+    ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle); ctx.fillStyle = "cyan";
+    ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-12, -12); ctx.lineTo(-6, 0); ctx.lineTo(-12, 12); ctx.fill(); ctx.restore();
+
+    ctx.fillStyle = "red"; ctx.beginPath(); ctx.arc(player.x, player.y, player.hitRadius, 0, Math.PI*2); ctx.fill();
+    if (player.hp > 1) { ctx.strokeStyle = "rgba(100, 255, 255, 0.6)"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(player.x, player.y, 22, 0, Math.PI*2); ctx.stroke(); }
+  }
+
+  if (activeBosses.length > 0) {
+    let b = activeBosses[0];
+    let barW = 300; let barX = (450 - barW) / 2;
+    ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(barX, 40, barW, 12);
+    ctx.fillStyle = b.color; ctx.fillRect(barX, 40, barW * Math.max(0, b.hp / b.maxHp), 12);
+    ctx.strokeStyle = "white"; ctx.strokeRect(barX, 40, barW, 12);
+    ctx.fillStyle = "white"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("WARNING: " + b.name, 225, 32); ctx.textAlign = "left";
+  }
+
+  const boxW = 80; const boxH = 25; const startX = (450 - (boxW * 5)) / 2; const y = 750;
+  for (let i = 0; i < POWERUPS.length; i++) {
+    let bx = startX + i * boxW;
+    ctx.strokeStyle = i === gaugeIndex ? "yellow" : "#555"; ctx.lineWidth = i === gaugeIndex ? 3 : 1;
+    ctx.strokeRect(bx, y, boxW - 2, boxH);
+    if (i === gaugeIndex) { ctx.fillStyle = "rgba(255, 255, 0, 0.3)"; ctx.fillRect(bx, y, boxW - 2, boxH); }
+    ctx.fillStyle = "white"; ctx.font = "10px sans-serif"; ctx.fillText(POWERUPS[i], bx + 5, y + 16);
+  }
+
+  if (gameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0,0,450,800);
+    ctx.fillStyle = "red"; ctx.font = "30px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", 225, 330);
+    ctx.fillStyle = "yellow"; ctx.font = "20px sans-serif"; ctx.fillText("Survival Time", 225, 380);
+    ctx.fillStyle = "white"; ctx.font = "28px sans-serif"; ctx.fillText(timerEl.innerText, 225, 420);
+    ctx.font = "16px sans-serif"; ctx.fillText("画面タップでリトライ", 225, 500); ctx.textAlign = "left";
+    
+    shareBtn.style.display = "block";
+  }
+}
+
+initGame();
+function loop(timestamp) {
+  if (!timestamp) timestamp = performance.now();
+  update(timestamp); draw(); requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
